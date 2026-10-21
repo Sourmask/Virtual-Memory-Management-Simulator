@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Memory Management Simulator</title>
+<style>
+  :root{
+    --bg:#000; --panel:#070304; --accent:#ff2d44; --line:#8c8c8c; --dim:#3a3a3a; --text:#f4e7e6; --mute:#a07479; --ok:#3ddc84;
+    --font:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.55 var(--font);display:flex;flex-direction:column}
+
+  /* ---------- top bar ---------- */
+  header{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--bg)}
+  header h1{margin:0 auto 0 0;font-size:16px;font-weight:700;letter-spacing:.3px}
+  header h1::before{content:">_ ";color:var(--accent)}
+  label{display:flex;gap:6px;align-items:center;color:var(--mute)}
+  select,input,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);padding:5px 9px;border-radius:0}
+  button{cursor:pointer;font-weight:700}
+  button:hover{background:var(--accent);color:#000}
+  button.solid{background:var(--accent);color:#000}
+  button.solid:hover{filter:brightness(1.15)}
+  :focus-visible{outline:1px dashed var(--line);outline-offset:2px}
+
+  /* ---------- two columns ---------- */
+  main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1.25fr;gap:16px;padding:16px 18px}
+  .col{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:14px;padding-right:4px}
+  @media(max-width:820px){body{height:auto}main{grid-template-columns:1fr}.col{overflow:visible}}
+
+  h2{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--accent)}
+  .box{border:1px solid var(--line);padding:12px 14px;background:var(--panel)}
+  .sub{color:var(--mute);margin:0 0 10px}
+
+  /* ---------- left: timeline of frame snapshots ---------- */
+  .empty{border:1px dashed var(--dim);padding:24px;color:var(--mute);text-align:center}
+  .step{border:1px solid var(--dim);padding:12px 14px;background:var(--panel);animation:pop .25s ease-out}
+  .step.fault{border-color:var(--line)}
+  .step.hit{border-color:#1e5a38}
+  @keyframes pop{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+  @media(prefers-reduced-motion:reduce){.step{animation:none}}
+  .step-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .step-head b{font-size:14px}
+  .tag{padding:1px 8px;border:1px solid;font-weight:700}
+  .tag.fault{color:var(--accent);border-color:var(--accent)}
+  .tag.hit{color:var(--ok);border-color:var(--ok)}
+  .fr{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .f{width:78px;border:1px solid var(--dim);text-align:center;padding:5px 0;position:relative}
+  .f small{display:block;color:var(--mute);font-size:10px}
+  .f .p{font-size:22px;font-weight:700;line-height:1.2}
+  .f.empty .p{color:var(--dim)}
+  .f.loaded{background:var(--accent);border-color:var(--accent);color:#000}
+  .f.loaded small{color:#000}
+  .f.touched{border-color:var(--ok);color:var(--ok)}
+  .f .old{position:absolute;top:2px;right:4px;font-size:10px;text-decoration:line-through;color:#000}
+  .why{margin:0;color:var(--text)}
+  .why em{font-style:normal;color:var(--accent);font-weight:700}
+
+  /* ---------- right: reference string, stats, log ---------- */
+  .refin{width:100%;margin-bottom:10px}
+  .strip{display:flex;gap:5px;flex-wrap:wrap}
+  .chip{width:32px;height:32px;display:grid;place-items:center;border:1px solid var(--dim);font-weight:700}
+  .chip.hit{border-color:var(--ok);color:var(--ok)}
+  .chip.fault{border-color:var(--accent);color:var(--accent)}
+  .chip.now{background:var(--accent);color:#000;border-color:var(--accent)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+  .stats b{display:block;font-size:24px;color:var(--accent)}
+  .stats span{color:var(--mute);font-size:11px}
+  .meter{height:10px;border:1px solid var(--line);margin-top:12px}
+  .meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+  #log{max-height:260px;overflow:auto}
+  #log p{margin:0;padding:3px 0;border-bottom:1px dashed var(--dim)}
+  .lf{color:var(--accent);font-weight:700}.lh{color:var(--ok);font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Virtual Memory Management Simulator</h1>
+  <label>algorithm
+    <select id="algo">
+      <option value="FIFO">FIFO</option>
+      <option value="LRU">LRU</option>
+      <option value="OPT">OPT</option>
+    </select>
+  </label>
+  <label>frames <input id="nf" type="number" min="1" max="8" value="3" style="width:56px"></label>
+  <label>speed <input id="spd" type="range" min="200" max="1500" value="800" style="width:90px;padding:0"></label>
+  <button id="step">Step</button>
+  <button id="play" class="solid">Play</button>
+  <button id="reset">Reset</button>
+</header>
+
+<main>
+  <!-- LEFT: reference string, stats, log -->
+  <div class="col">
+    <div class="box">
+      <h2>Reference string</h2>
+      <input id="refs" class="refin" value="7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1" aria-label="Reference string">
+      <div class="strip" id="strip"></div>
+    </div>
+    <div class="box">
+      <h2>Stats</h2>
+      <div class="stats">
+        <div><b id="sAcc">0</b><span>accesses</span></div>
+        <div><b id="sHit">0</b><span>hits</span></div>
+        <div><b id="sFault">0</b><span>faults</span></div>
+        <div><b id="sRatio">0%</b><span>hit ratio</span></div>
+      </div>
+      <div class="meter"><i id="meter"></i></div>
+    </div>
+    <div class="box">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: one set of frames per access -->
+  <div class="col" id="left">
+    <div class="empty" id="empty">
+      Press <b>Step</b> or <b>Play</b>.<br>
+      Every memory access adds a new set of frames here, with an explanation of what happened.
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let refs, frames, loadedAt, usedAt, idx, hits, faults, results, timer;
+
+/* ---------------- logic ---------------- */
+function init(){
+  stop();
+  refs = $('refs').value.trim().split(/[\s,]+/).map(Number).filter(n => Number.isInteger(n) && n >= 0);
+  const n = Math.max(1, Math.min(8, +$('nf').value || 3));
+  frames = Array(n).fill(null);
+  loadedAt = Array(n).fill(0);
+  usedAt = Array(n).fill(0);
+  idx = hits = faults = 0;
+  results = [];
+  document.querySelectorAll('.step').forEach(e => e.remove());
+  $('empty').style.display = '';
+  $('log').innerHTML = '';
+  render();
+}
+
+// returns {frame, reason} describing which frame to evict and why
+function pickVictim(){
+  const algo = $('algo').value;
+  if (algo === 'FIFO'){
+    const f = loadedAt.indexOf(Math.min(...loadedAt));
+    return {f, why: `FIFO evicts the page that has been in memory longest. Frame ${f} (page ${frames[f]}) was loaded at step ${loadedAt[f]}.`};
+  }
+  if (algo === 'LRU'){
+    const f = usedAt.indexOf(Math.min(...usedAt));
+    return {f, why: `LRU evicts the least recently used page. Frame ${f} (page ${frames[f]}) was last used at step ${usedAt[f]}.`};
+  }
+  let far = -1, f = 0, note = '';
+  frames.forEach((p, i) => {
+    let nx = refs.indexOf(p, idx + 1);
+    const at = nx < 0 ? Infinity : nx;
+    if (at > far){ far = at; f = i; note = nx < 0 ? 'is never used again' : `is next used at step ${nx + 1}`; }
+  });
+  return {f, why: `OPT evicts the page needed furthest in the future. Page ${frames[f]} in frame ${f} ${note}.`};
+}
+
+function step(){
+  if (idx >= refs.length){ stop(); return; }
+  const page = refs[idx], t = idx + 1;
+  let f = frames.indexOf(page), hit = f >= 0, old = null, text;
+
+  if (hit){
+    hits++; usedAt[f] = t;
+    text = `Page <em>${page}</em> is already in frame ${f}, so this is a <em>hit</em>. No disk access is needed; its last-used time updates to step ${t}.`;
+  } else {
+    faults++;
+    f = frames.indexOf(null);
+    if (f >= 0){
+      text = `Page <em>${page}</em> is not in memory, so a <em>page fault</em> occurs. Frame ${f} is free, so the page is loaded there.`;
+    } else {
+      const v = pickVictim();
+      f = v.f; old = frames[f];
+      text = `Page <em>${page}</em> is not in memory and every frame is full: a <em>page fault</em>. ${v.why} Page ${old} is evicted and page ${page} takes frame ${f}.`;
+    }
+    frames[f] = page; loadedAt[f] = t; usedAt[f] = t;
+  }
+  results.push(hit ? 'hit' : 'fault');
+  idx++;
+
+  addCard({t, page, hit, f, old, text, snap: frames.slice()});
+  $('log').insertAdjacentHTML('afterbegin',
+    `<p><span class="${hit ? 'lh' : 'lf'}">${hit ? 'HIT  ' : 'FAULT'}</span> step ${t}: page ${page} ${hit ? 'in frame ' + f : (old === null ? 'to free frame ' + f : 'replaces ' + old + ' in frame ' + f)}</p>`);
+  render();
+  if (idx >= refs.length) stop();
+}
+
+/* ---------------- UI ---------------- */
+function addCard({t, page, hit, f, old, text, snap}){
+  $('empty').style.display = 'none';
+  const cells = snap.map((p, i) => {
+    let cls = p === null ? 'empty' : '';
+    if (i === f) cls = hit ? 'touched' : 'loaded';
+    return `<div class="f ${cls}"><small>frame ${i}</small>${i === f && old !== null ? `<span class="old">${old}</span>` : ''}<div class="p">${p === null ? '-' : p}</div></div>`;
+  }).join('');
+  const el = document.createElement('div');
+  el.className = 'step ' + (hit ? 'hit' : 'fault');
+  el.innerHTML = `
+    <div class="step-head"><b>Step ${t}: request page ${page}</b><span class="tag ${hit ? 'hit' : 'fault'}">${hit ? 'HIT' : 'PAGE FAULT'}</span></div>
+    <div class="fr">${cells}</div>
+    <p class="why">${text}</p>`;
+  $('left').appendChild(el);
+  el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+function render(){
+  $('strip').innerHTML = refs.map((p, i) =>
+    `<div class="chip ${results[i] || ''} ${i === idx ? 'now' : ''}">${p}</div>`).join('');
+  const total = hits + faults, r = total ? Math.round(hits / total * 100) : 0;
+  $('sAcc').textContent = total; $('sHit').textContent = hits; $('sFault').textContent = faults;
+  $('sRatio').textContent = r + '%'; $('meter').style.width = r + '%';
+  $('play').textContent = timer ? 'Pause' : 'Play';
+}
+
+function stop(){ if (timer){ clearInterval(timer); timer = null; } $('play').textContent = 'Play'; }
+function play(){
+  if (timer){ stop(); return; }
+  if (idx >= refs.length) init();
+  timer = setInterval(step, +$('spd').value);
+  render();
+}
+
+$('step').onclick = () => { stop(); step(); };
+$('play').onclick = play;
+$('reset').onclick = init;
+$('algo').onchange = init;
+$('nf').onchange = init;
+$('refs').onchange = init;
+$('spd').oninput = () => { if (timer){ stop(); play(); } };
+
+init();
+</script>
+</body>
+</html>
