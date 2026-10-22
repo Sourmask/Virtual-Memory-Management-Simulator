@@ -1,140 +1,113 @@
 # Virtual Memory Management Simulator
 
-Virtual Memory Management Simulator (VMM-SIM) is an educational application for exploring how operating systems manage a limited number of physical-memory frames. It replays a page-reference string one access at a time, shows hits and page faults, and demonstrates how FIFO, LRU, and OPT choose a page to replace when memory is full.
+VMM-SIM demonstrates how operating systems manage a limited number of physical-memory frames. Its browser interface uses the C simulation engine compiled to WebAssembly, so the page replacement decisions are made by C while the browser displays each step, frame snapshot, log entry, and statistic.
 
-The repository contains two interfaces:
+## Run the browser simulator
 
-- A standalone browser application in [`index.html`](./index.html), with its simulation logic implemented in JavaScript.
-- A desktop application in [`app.py`](./app.py), which uses the reusable Python simulation engine in [`vmm.py`](./vmm.py).
+### Requirements
 
-The browser and desktop applications work independently; the browser version does not call the Python module.
+- Emscripten SDK (`emcc`) to compile the C engine to WebAssembly.
+- Python 3, Node.js, or another simple local HTTP server. Browsers generally block loading WebAssembly from a `file://` URL.
 
-## Features
+### Build and serve
 
-- Choose a page-replacement algorithm: FIFO, LRU, or OPT.
-- Choose between 1 and 8 physical-memory frames.
-- Enter a page-reference string as non-negative integers separated by spaces or commas.
-- Advance one memory access at a time or play the simulation automatically.
-- Inspect frame contents after each access and see which page was loaded or evicted.
-- Track access, hit, and fault counts and the hit ratio.
-- Review a chronological log of simulation events.
+From the project directory, build the browser module:
 
-The browser interface also lets you adjust playback speed and gives a written explanation for each frame replacement. The desktop interface provides the same core simulation controls and statistics in a compact Tkinter window.
-
-## Run the application
-
-### Browser application
-
-Open `index.html` in a modern web browser. No server, package installation, or build step is required.
-
-1. Enter a reference string, or use the provided example.
-2. Select an algorithm and frame count.
-3. Select **Step** to process one reference, or **Play** to run continuously.
-4. Select **Reset** to start again with the current inputs.
-
-The browser interface runs entirely in the page and does not send reference strings to a server.
-
-### Python desktop application
-
-Python 3.7 or later is required for the standard-library `dataclasses` module. A working Tkinter installation is also required; some Linux distributions provide Tkinter as a separate system package.
-
-From the project directory, run:
-
-```bash
-python app.py
+```powershell
+.\build-wasm.bat
 ```
 
-On systems where the Python 3 command is named `python3`, use:
+Run this from an Emscripten-enabled terminal where `emcc` is on `PATH`. The build creates `vmm.js` and `vmm.wasm` beside `index.html`.
 
-```bash
-python3 app.py
+Start a local server in the same directory:
+
+```powershell
+python -m http.server 8000
 ```
 
-Choose an algorithm and frame count from the top bar. Use **Step** to process one access, **Play** to run the remaining references automatically, **Pause** to stop playback, or **Reset** to restart. The default reference string is prefilled; edit it and press Enter to apply it.
+Then open <http://localhost:8000/> in a browser. Keep the server running while using the page. The browser UI is not a second JavaScript implementation of the replacement policies: it calls the C engine in WebAssembly for initialization, each memory access, frame state, and statistics. JavaScript handles input validation, animation, presentation, and explanatory text.
 
-The reusable Python engine can also be imported independently:
+Choose FIFO, LRU, or OPT, set 1–8 frames, enter non-negative integer page references separated by spaces or commas, then use **Step** or **Play**. **Reset** applies the current settings. Play speed is adjustable. The default reference string is `7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1`.
 
-```python
-from vmm import ALGORITHMS, Simulator
+If the browser reports that the WebAssembly files are missing, run the build step and reload the page. If `emcc` is not recognized, activate/install the Emscripten SDK first.
 
-references = [7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2, 1, 2, 0, 1, 7, 0, 1]
-simulator = Simulator(references, num_frames=3, algo="LRU")
+## Python desktop implementation
 
-while (event := simulator.step()) is not None:
-    print(event.describe())
+The original Tkinter desktop version is kept separately under [`python implementation/`](./python%20implementation/). Run it from the project root with:
 
-print("Hits:", simulator.hits)
-print("Faults:", simulator.faults)
-print("Hit ratio:", simulator.hit_ratio)
+```powershell
+python ".\python implementation\app.py"
 ```
 
-For Python versions before 3.8, replace the assignment expression in this example with a conventional loop:
+[`app.py`](./python%20implementation/app.py) imports the Python simulation engine from [`vmm.py`](./python%20implementation/vmm.py) in the same folder. Python 3.7 or later and a working Tkinter installation are required. The Python implementation is independent of the C/WebAssembly browser simulator.
 
-```python
-while True:
-    event = simulator.step()
-    if event is None:
-        break
-    print(event.describe())
+## C command-line simulator
+
+The same C engine is also available as a native command-line program. It requires GCC or Clang:
+
+```powershell
+gcc -std=c99 -Wall -Wextra -O2 main.c vmm.c -o vmm.exe
+.\vmm.exe
 ```
 
-`algo` must be one of the names in `ALGORITHMS`: `"FIFO"`, `"LRU"`, or `"OPT"`. `step()` returns an `Event` for the next reference, or `None` when the reference string has been processed. Each event includes its 1-based step number, requested page, whether it was a hit, the frame involved, and any evicted page.
+Select the policy, frame count, and references with command-line options:
+
+```powershell
+.\vmm.exe --algorithm LRU --frames 3 --refs "7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1"
+```
+
+Supported algorithms are `FIFO`, `LRU`, and `OPT`. Frame counts must be 1–8. References are non-negative integers separated by spaces or commas; quote the reference string so it is passed as one argument. Use `--help` to display usage. The program prints each access and frame state, followed by totals and hit ratio.
+
+For the built-in 20-reference example with three frames, the expected fault counts are FIFO: 15, LRU: 12, and OPT: 9.
 
 ## How the simulation works
 
-### Virtual pages and physical frames
+A reference string is an ordered sequence of page numbers. Each physical frame stores one page or is empty. For each reference:
 
-A reference string is an ordered sequence of page numbers requested by a process. The simulator models physical memory as a fixed number of frames. A frame contains one page or is empty.
-
-For each reference:
-
-1. If the requested page is already in a frame, the access is a **hit**. The page stays in memory.
-2. Otherwise, the access is a **page fault**. The page is loaded into an empty frame if one is available.
-3. If all frames are occupied, the selected replacement policy chooses a victim page. The victim is evicted and the requested page takes its frame.
-
-The Python `Simulator` maintains the frames, the next reference position, per-frame load and use times, hit and fault totals, and an event history. The browser version maintains equivalent state in JavaScript and additionally records a snapshot of the frames for each displayed step.
+1. If the requested page is already resident, it is a **hit**.
+2. Otherwise it is a **page fault**. The page is loaded into a free frame if one is available.
+3. If all frames are occupied, a replacement policy chooses a victim and the requested page takes its frame.
 
 ### Replacement algorithms
 
-- **FIFO (First-In, First-Out):** Evicts the page that has been in its current frame the longest. A page's load time is updated when it is loaded into a frame, not when it is hit.
-- **LRU (Least Recently Used):** Evicts the page whose most recent access is oldest. A page's last-used time is updated on both a hit and a load.
-- **OPT (Optimal):** Evicts the resident page whose next reference is farthest in the future. If a page is never referenced again, it is an optimal victim. This policy looks ahead through the complete reference string, so it is useful for comparison and teaching; a real operating system cannot know future references in advance.
+- **FIFO (First-In, First-Out):** Evicts the page that has been in its frame the longest. A hit does not change the page's load time.
+- **LRU (Least Recently Used):** Evicts the page whose most recent access is oldest. A hit updates its last-used time.
+- **OPT (Optimal):** Evicts the resident page whose next use is farthest in the remaining reference string. A page never used again is an optimal victim. OPT uses future knowledge for comparison; an operating system cannot know future references in advance.
 
-If there is a tie when choosing a victim, the first matching frame is selected.
+When candidates tie, the lowest-index frame is selected.
 
 ### Statistics
 
-- **Accesses:** References processed so far.
-- **Hits:** References found in an existing frame.
+- **Accesses:** Number of references processed.
+- **Hits:** References already present in a frame.
 - **Faults:** References that required loading a page.
-- **Hit ratio:** `hits / accesses`. It is displayed as a percentage in the interfaces. Before any access, the ratio is zero.
+- **Hit ratio:** `hits / accesses`, or zero before any accesses.
 
-Every processed reference is either a hit or a fault, so `accesses = hits + faults`.
+Every access is either a hit or a fault, so `accesses = hits + faults`.
+
+## C engine API
+
+[`vmm.h`](./vmm.h) declares the public API and data types; [`vmm.c`](./vmm.c) implements the simulator. The browser adapter in [`vmm_web.c`](./vmm_web.c) exposes the engine to the WebAssembly interface. The main API operations are:
+
+- `vmm_init(...)` initializes simulator state and frame bookkeeping.
+- `vmm_step(...)` processes one reference and fills a `VMMEvent`; it returns `false` when the sequence is complete.
+- `vmm_done(...)` checks whether all references have been processed.
+- `vmm_hit_ratio(...)` returns the ratio from 0.0 to 1.0.
+- `vmm_destroy(...)` releases simulator allocations.
+
+The engine borrows the reference array; it must remain valid while the simulator uses it. Each event contains the 1-based step, requested page, hit/fault result, frame index, and optional evicted page.
 
 ## Project files
 
 | File | Purpose |
 | --- | --- |
-| [`index.html`](./index.html) | Self-contained browser UI, styling, JavaScript simulation, playback, frame snapshots, explanations, and statistics. |
-| [`app.py`](./app.py) | Tkinter desktop interface. Uses `Simulator` and `ALGORITHMS` from `vmm.py`. |
-| [`vmm.py`](./vmm.py) | Reusable Python simulation engine, event model, and command-line demonstration. |
+| [`index.html`](./index.html) | Browser UI, controls, snapshots, explanations, and statistics. |
+| [`vmm.c`](./vmm.c) | Shared C page-replacement engine. |
+| [`vmm.h`](./vmm.h) | C simulator API and data types. |
+| [`vmm_web.c`](./vmm_web.c) | C-to-JavaScript/WebAssembly interface for the browser. |
+| [`build-wasm.bat`](./build-wasm.bat) | Emscripten build command for `vmm.js` and `vmm.wasm`. |
+| [`main.c`](./main.c) | Native C command-line interface and input parser. |
+| [`python implementation/app.py`](./python%20implementation/app.py) | Tkinter desktop interface implemented in Python. |
+| [`python implementation/vmm.py`](./python%20implementation/vmm.py) | Python simulation engine used by the desktop app. |
 
-Run the Python engine's built-in example with:
-
-```bash
-python vmm.py
-```
-
-It processes a textbook reference string with three frames and prints hit and fault totals for all three algorithms. The expected fault totals for that example are FIFO: 15, LRU: 12, and OPT: 9.
-
-## Input and behavior notes
-
-- The interfaces start with the same example reference string: `7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1`.
-- The browser parser accepts non-negative integer pages separated by whitespace or commas and ignores tokens that are not valid non-negative integers.
-- The desktop app parses whitespace-separated integers; commas are not treated as separators there.
-- The desktop UI constrains its frame selector to 1–8. The browser clamps its frame count to that range.
-- The Python engine handles an empty reference sequence with no accesses and a zero hit ratio. In the browser UI, clearing the input currently parses as a single reference to page `0`.
-
-## Testing
-
-No separate automated test suite is included in the repository. The `python vmm.py` command is a small built-in smoke check of the Python engine and the expected textbook results.
+The browser uses the C engine compiled to WebAssembly. The native CLI also uses the C engine. The Python desktop implementation is retained separately in `python implementation/`.

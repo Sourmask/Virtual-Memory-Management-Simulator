@@ -33,6 +33,9 @@
   h2{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--accent)}
   .box{border:1px solid var(--line);padding:12px 14px;background:var(--panel)}
   .sub{color:var(--mute);margin:0 0 10px}
+  .status{margin:0 18px;color:var(--mute)}
+  .status.error{color:var(--accent)}
+  button:disabled{cursor:wait;opacity:.55}
 
   /* ---------- left: timeline of frame snapshots ---------- */
   .empty{border:1px dashed var(--dim);padding:24px;color:var(--mute);text-align:center}
@@ -96,6 +99,7 @@
 <main>
   <!-- LEFT: reference string, stats, log -->
   <div class="col">
+    <p class="status" id="status" role="status">Loading C WebAssembly simulator…</p>
     <div class="box">
       <h2>Reference string</h2>
       <input id="refs" class="refin" value="7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1" aria-label="Reference string">
@@ -126,75 +130,126 @@
   </div>
 </main>
 
+<script src="vmm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
-let refs, frames, loadedAt, usedAt, idx, hits, faults, results, timer;
+let Module, refs = [], frames = [], idx = 0, hits = 0, faults = 0;
+let results = [], timer = null, referencesPointer = 0;
 
-/* ---------------- logic ---------------- */
-function init(){
-  stop();
-  refs = $('refs').value.trim().split(/[\s,]+/).map(Number).filter(n => Number.isInteger(n) && n >= 0);
-  const n = Math.max(1, Math.min(8, +$('nf').value || 3));
-  frames = Array(n).fill(null);
-  loadedAt = Array(n).fill(0);
-  usedAt = Array(n).fill(0);
-  idx = hits = faults = 0;
-  results = [];
-  document.querySelectorAll('.step').forEach(e => e.remove());
-  $('empty').style.display = '';
-  $('log').innerHTML = '';
-  render();
+function setStatus(message, isError = false){
+  const status = $('status');
+  status.textContent = message;
+  status.classList.toggle('error', isError);
+  status.hidden = !message;
 }
 
-// returns {frame, reason} describing which frame to evict and why
-function pickVictim(){
-  const algo = $('algo').value;
-  if (algo === 'FIFO'){
-    const f = loadedAt.indexOf(Math.min(...loadedAt));
-    return {f, why: `FIFO evicts the page that has been in memory longest. Frame ${f} (page ${frames[f]}) was loaded at step ${loadedAt[f]}.`};
-  }
-  if (algo === 'LRU'){
-    const f = usedAt.indexOf(Math.min(...usedAt));
-    return {f, why: `LRU evicts the least recently used page. Frame ${f} (page ${frames[f]}) was last used at step ${usedAt[f]}.`};
-  }
-  let far = -1, f = 0, note = '';
-  frames.forEach((p, i) => {
-    let nx = refs.indexOf(p, idx + 1);
-    const at = nx < 0 ? Infinity : nx;
-    if (at > far){ far = at; f = i; note = nx < 0 ? 'is never used again' : `is next used at step ${nx + 1}`; }
+function parseReferences(){
+  const input = $('refs').value.trim();
+  if (!input) return [];
+  const tokens = input.split(/[\s,]+/);
+  const pages = tokens.map(token => {
+    if (!/^\d+$/.test(token)) throw new Error(`Invalid page reference: "${token}". Use non-negative integers.`);
+    const page = Number(token);
+    if (!Number.isSafeInteger(page)) throw new Error(`Page number is too large: "${token}".`);
+    return page;
   });
-  return {f, why: `OPT evicts the page needed furthest in the future. Page ${frames[f]} in frame ${f} ${note}.`};
+  return pages;
+}
+
+function syncState(){
+  idx = Module._vmm_web_position();
+  hits = Module._vmm_web_hits();
+  faults = Module._vmm_web_faults();
+  frames = Array.from({length: Module._vmm_web_frame_count()}, (_, frame) =>
+    Module._vmm_web_frame_occupied(frame)
+      ? Module._vmm_web_frame_page(frame)
+      : null);
+}
+
+function init(){
+  stop();
+  if (!Module) return false;
+  let nextRefs;
+  try {
+    nextRefs = parseReferences();
+  } catch (error) {
+    setStatus(error.message, true);
+    return false;
+  }
+  const frameCount = Math.max(1, Math.min(8, Number($('nf').value) || 3));
+  const pageBytes = nextRefs.length * BigInt64Array.BYTES_PER_ELEMENT;
+  const nextPointer = nextRefs.length ? Module._malloc(pageBytes) : 0;
+  if (nextRefs.length && !nextPointer){
+    setStatus('Unable to allocate memory for the reference string.', true);
+    return false;
+  }
+  if (nextRefs.length){
+    const memory = new BigInt64Array(Module.HEAPU8.buffer, nextPointer, nextRefs.length);
+    memory.set(nextRefs.map(page => BigInt(page)));
+  }
+  const algorithm = $('algo').selectedIndex;
+  const ok = Module._vmm_web_init(nextPointer, nextRefs.length, frameCount, algorithm);
+  destroyOldReferences();
+  if (!ok){
+    if (nextPointer) Module._free(nextPointer);
+    referencesPointer = 0;
+    setStatus('The C simulator could not initialize. Check the selected inputs and try again.', true);
+    return false;
+  }
+  referencesPointer = nextPointer;
+  refs = nextRefs;
+  results = [];
+  syncState();
+  document.querySelectorAll('.step').forEach(element => element.remove());
+  $('empty').style.display = '';
+  $('log').innerHTML = '';
+  setStatus('');
+  render();
+  return true;
+}
+
+function destroyOldReferences(){
+  if (referencesPointer) Module._free(referencesPointer);
+  referencesPointer = 0;
 }
 
 function step(){
-  if (idx >= refs.length){ stop(); return; }
-  const page = refs[idx], t = idx + 1;
-  let f = frames.indexOf(page), hit = f >= 0, old = null, text;
-
-  if (hit){
-    hits++; usedAt[f] = t;
-    text = `Page <em>${page}</em> is already in frame ${f}, so this is a <em>hit</em>. No disk access is needed; its last-used time updates to step ${t}.`;
-  } else {
-    faults++;
-    f = frames.indexOf(null);
-    if (f >= 0){
-      text = `Page <em>${page}</em> is not in memory, so a <em>page fault</em> occurs. Frame ${f} is free, so the page is loaded there.`;
-    } else {
-      const v = pickVictim();
-      f = v.f; old = frames[f];
-      text = `Page <em>${page}</em> is not in memory and every frame is full: a <em>page fault</em>. ${v.why} Page ${old} is evicted and page ${page} takes frame ${f}.`;
-    }
-    frames[f] = page; loadedAt[f] = t; usedAt[f] = t;
+  if (!Module || Module._vmm_web_done()){ stop(); return; }
+  if (!Module._vmm_web_step()){
+    stop();
+    setStatus('The C simulator could not process the next reference.', true);
+    return;
   }
+  const page = Module._vmm_web_event_page();
+  const t = idx + 1;
+  const hit = Module._vmm_web_event_hit() !== 0;
+  const f = Module._vmm_web_event_frame();
+  const hasEvicted = Module._vmm_web_event_has_evicted() !== 0;
+  const old = hasEvicted ? Module._vmm_web_event_evicted() : null;
+  const algo = $('algo').value;
+  let text;
+  if (hit){
+    text = `Page <em>${page}</em> is already in frame ${f}, so this is a <em>hit</em>. No page replacement is needed.`;
+  } else if (old === null){
+    text = `Page <em>${page}</em> is not in memory, so a <em>page fault</em> occurs. Frame ${f} is free, so the page is loaded there.`;
+  } else if (algo === 'FIFO'){
+    text = `Page <em>${page}</em> is not in memory and every frame is full: a <em>page fault</em>. FIFO evicts the page that has been in memory longest. Page ${old} is replaced in frame ${f}.`;
+  } else if (algo === 'LRU'){
+    text = `Page <em>${page}</em> is not in memory and every frame is full: a <em>page fault</em>. LRU evicts the resident page used least recently. Page ${old} is replaced in frame ${f}.`;
+  } else {
+    const nextUse = refs.indexOf(old, idx);
+    const reason = nextUse < 0 ? 'it is never used again' : `its next use is at step ${nextUse + 1}`;
+    text = `Page <em>${page}</em> is not in memory and every frame is full: a <em>page fault</em>. OPT looks ahead and evicts page ${old} because ${reason}. It is replaced in frame ${f}.`;
+  }
+  syncState();
   results.push(hit ? 'hit' : 'fault');
-  idx++;
 
   addCard({t, page, hit, f, old, text, snap: frames.slice()});
   $('log').insertAdjacentHTML('afterbegin',
     `<p><span class="${hit ? 'lh' : 'lf'}">${hit ? 'HIT  ' : 'FAULT'}</span> step ${t}: page ${page} ${hit ? 'in frame ' + f : (old === null ? 'to free frame ' + f : 'replaces ' + old + ' in frame ' + f)}</p>`);
   render();
-  if (idx >= refs.length) stop();
+  if (Module._vmm_web_done()) stop();
 }
 
 /* ---------------- UI ---------------- */
@@ -218,7 +273,8 @@ function addCard({t, page, hit, f, old, text, snap}){
 function render(){
   $('strip').innerHTML = refs.map((p, i) =>
     `<div class="chip ${results[i] || ''} ${i === idx ? 'now' : ''}">${p}</div>`).join('');
-  const total = hits + faults, r = total ? Math.round(hits / total * 100) : 0;
+  const total = hits + faults;
+  const r = Module ? Math.round(Module._vmm_web_hit_ratio() * 100) : 0;
   $('sAcc').textContent = total; $('sHit').textContent = hits; $('sFault').textContent = faults;
   $('sRatio').textContent = r + '%'; $('meter').style.width = r + '%';
   $('play').textContent = timer ? 'Pause' : 'Play';
@@ -227,7 +283,8 @@ function render(){
 function stop(){ if (timer){ clearInterval(timer); timer = null; } $('play').textContent = 'Play'; }
 function play(){
   if (timer){ stop(); return; }
-  if (idx >= refs.length) init();
+  if (!Module) return;
+  if (Module._vmm_web_done() && !init()) return;
   timer = setInterval(step, +$('spd').value);
   render();
 }
@@ -240,7 +297,24 @@ $('nf').onchange = init;
 $('refs').onchange = init;
 $('spd').oninput = () => { if (timer){ stop(); play(); } };
 
-init();
+function enableControls(enabled){
+  document.querySelectorAll('header button, header select, header input, #refs')
+    .forEach(control => { control.disabled = !enabled; });
+}
+
+enableControls(false);
+if (typeof createVMMModule !== 'function'){
+  setStatus('C WebAssembly files are missing. Build vmm.js and vmm.wasm with the instructions in README.md.', true);
+} else {
+  createVMMModule({locateFile: path => path}).then(module => {
+    Module = module;
+    enableControls(true);
+    init();
+  }).catch(error => {
+    console.error('Unable to load C WebAssembly simulator:', error);
+    setStatus('Unable to load the C WebAssembly simulator. Build the WebAssembly files and serve this folder over HTTP.', true);
+  });
+}
 </script>
 </body>
 </html>
